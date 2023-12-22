@@ -1,0 +1,462 @@
+import tkinter as tk
+from tkinter import ttk, colorchooser, simpledialog, filedialog, messagebox
+import cv2
+import numpy as np
+from PIL import Image, ImageTk, ImageFilter
+
+
+class PaintApp:
+    def __init__(self, window):
+        self.window = window
+        self.window.title("Paint Application")
+
+        # Sidebar Frame
+        self.sidebar_frame = ttk.Frame(self.window)
+        self.sidebar_frame.pack(side=tk.LEFT, fill=tk.Y)
+
+        self.toggle_canvas_button = ttk.Button(self.sidebar_frame, text="Toggle Canvas", command=self.toggle_canvas)
+        self.toggle_canvas_button.pack(side=tk.TOP, fill=tk.X, pady=5)
+
+        self.canvas_frame = ttk.Frame(self.window)
+        self.canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Bouton pour masquer/révéler la barre latérale
+        self.toggle_sidebar_button = ttk.Button(self.canvas_frame, text="Toggle Sidebar", command=self.toggle_sidebar)
+        self.toggle_sidebar_button.pack(side=tk.TOP, fill=tk.X, pady=5)
+
+        # Bouton pour flouter le visage détecté
+        self.blur_face_button = ttk.Button(self.canvas_frame, text="Blur Face", command=self.blur_faces)
+        self.blur_face_button.pack(side=tk.TOP, fill=tk.X, pady=5)
+        # Fonction pour flouter le visage détecté
+        self.face_blurred = False  # Pour suivre l'état du floutage du visage
+        self.selected_face_index = 0  # Indice du visage sélectionné
+        self.face_blur_intensity = 15  # Intensité du flou du visage
+
+        # Sidebar Frame 2
+        self.sidebar_frame_2 = ttk.Frame(self.window)
+        self.sidebar_frame_2.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Canvas Frame
+        self.canvas_frame = ttk.Frame(self.window)
+        self.canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Canvas
+        self.canvas = tk.Canvas(self.canvas_frame, bg="white", width=800, height=600, borderwidth=2, relief="flat",
+                                highlightthickness=5, highlightbackground="white")
+        self.canvas.pack()
+
+        self.brush_size = 5
+        self.color = "black"
+        self.start_x = None
+        self.start_y = None
+        self.prev_x = None
+        self.prev_y = None
+        self.drawing = False
+        self.shape_type = "line"
+        # menus
+        self.create_menu()
+        ####
+        self.cap = None
+        self.capture_id = None
+        self.image = None
+        self.tk_image = None
+
+        # Sidebar Buttons
+        self.sidebar_buttons = [
+            ("Line", "line"),
+            ("Rectangle", "rectangle"),
+            ("Circle", "circle"),
+            ("Ellipse", "ellipse"),
+            ("Square", "square"),
+            ("Triangle", "triangle"),
+            ("Star", "star"),
+            ("Arrow", "arrow"),
+            ("Brush", "brush"),
+            ("Eraser", "eraser"),
+            ("Detect Face", self.detect_face)
+        ]
+
+        for text, command in self.sidebar_buttons:
+            button = tk.Button(self.sidebar_frame, text=text, command=lambda cmd=command: self.change_shape(cmd))
+            button.pack(side=tk.TOP, fill=tk.X, pady=5)
+
+        # Sidebar 2 Buttons
+        self.sidebar_2_buttons = [
+            ("Rotate 90°", self.rotate_90_degrees),
+            ("Rotate 180°", self.rotate_180_degrees),
+            ("Rotate 270°", self.rotate_270_degrees),
+            ("Rotate Custom", self.rotate_custom),
+            ("Load Image", self.load_image),
+            ("Blur Image", self.blur_image),
+            ("Edge Detection", self.edge_detection),
+            ("Crop Image", self.crop_image)
+        ]
+
+        for text, command in self.sidebar_2_buttons:
+            button = tk.Button(self.sidebar_frame_2, text=text, command=lambda cmd=command: self.execute_command(cmd))
+            button.pack(side=tk.TOP, fill=tk.X, pady=5)
+
+        self.canvas.bind("<Button-1>", self.start_drawing)
+        self.canvas.bind("<B1-Motion>", self.draw)
+        self.canvas.bind("<ButtonRelease-1>", self.stop_drawing)
+
+
+
+    ##menus haut
+    def open_file(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.gif")])
+        if file_path:
+            # Ajoutez votre logique pour ouvrir un fichier ici
+            pass
+
+    def save_file(self):
+        file_path = filedialog.asksaveasfilename(defaultextension=".png",
+                                                 filetypes=[("PNG files", "*.png"),
+                                                            ("All files", "*.*")])
+        if file_path:
+            self.canvas.postscript(file=file_path + ".eps", colormode="color")
+            messagebox.showinfo("Enregistrement", "Image enregistrée avec succès.")
+
+    def undo(self):
+        items = self.canvas.find_all()
+        if items:
+            item_id = items[-1]
+            item_type = self.canvas.type(item_id)
+            item_coords = self.canvas.coords(item_id)
+
+            # Stocker l'élément supprimé pour la possibilité de rétablir (redo)
+            self.undo_stack.append((item_id, item_type, item_coords))
+
+            self.canvas.delete(item_id)
+
+    def redo(self):
+        if self.undo_stack:
+            item_id, item_type, item_coords = self.undo_stack.pop()
+
+            # Restaurer l'élément supprimé
+            if item_type == "line":
+                self.canvas.create_line(item_coords, fill=self.color, width=self.brush_size)
+            elif item_type == "rectangle":
+                self.canvas.create_rectangle(item_coords, outline=self.color, width=self.brush_size)
+            elif item_type == "oval":
+                self.canvas.create_oval(item_coords, outline=self.color, width=self.brush_size)
+
+    def zoom_in(self):
+        current_width = self.canvas.winfo_reqwidth()
+        current_height = self.canvas.winfo_reqheight()
+        new_width = int(current_width * 1.2)
+        new_height = int(current_height * 1.2)
+        self.canvas.config(width=new_width, height=new_height)
+
+    def zoom_out(self):
+        current_width = self.canvas.winfo_reqwidth()
+        current_height = self.canvas.winfo_reqheight()
+        new_width = int(current_width / 1.2)
+        new_height = int(current_height / 1.2)
+        self.canvas.config(width=new_width, height=new_height)
+    #####
+    def create_menu(self):
+        menu_bar = tk.Menu(self.window)
+
+        file_menu = tk.Menu(menu_bar, tearoff=0)
+        file_menu.add_command(label="Nouveau", command=self.new_canvas)
+        file_menu.add_command(label="ouvrir Image", command=self.load_image)
+        file_menu.add_command(label="Ouvrir",command=self.open_file)
+        file_menu.add_command(label="Enregistrer",command=self.save_file)
+        file_menu.add_separator()
+        file_menu.add_command(label="Sortie", command=self.window.quit)
+
+        tool_menus = tk.Menu(menu_bar, tearoff=0)
+        tool_menus.add_command(label="zoum +", command=self.zoom_in)
+        tool_menus.add_command(label="zoum -", command=self.zoom_out)
+        tool_menus.add_command(label="redo ctrl+z", command=self.redo)
+        tool_menus.add_command(label="undo ctrl+w", command=self.undo)
+
+
+        log = tk.Menu(menu_bar, tearoff=0)
+        log.add_command(label="Presse papier")
+        log.add_command(label="Formes")
+        log.add_command(label="couleurs")
+
+        capture_menu = tk.Menu(menu_bar, tearoff=0)
+        capture_menu.add_command(label="Start Capture", )
+        capture_menu.add_command(label="Stop Capture", state=tk.DISABLED)
+
+        menu_bar.add_cascade(label="Fichier", menu=file_menu)
+        menu_bar.add_cascade(label="outils", menu=tool_menus)
+        menu_bar.add_cascade(label="Accueil", menu=log)
+
+        self.window.config(menu=menu_bar)
+
+    def new_canvas(self):
+        self.canvas.delete("all")
+
+    def toggle_canvas(self):
+        if self.canvas.winfo_ismapped():
+            self.canvas.pack_forget()  # Masquer le canevas
+        else:
+            self.canvas.pack()  # Révéler le canevas
+
+    def toggle_sidebar(self):
+        if self.sidebar_frame.winfo_ismapped():
+            self.sidebar_frame.pack_forget()  # Masquer la barre latérale
+        else:
+            self.sidebar_frame.pack(side=tk.LEFT, fill=tk.Y)  # Révéler la barre latérale
+
+    def toggle_sidebar_2(self):
+        if self.sidebar_frame_2.winfo_ismapped():
+            self.sidebar_frame_2.pack_forget()  # Masquer la barre latérale 2
+        else:
+            self.sidebar_frame_2.pack(side=tk.LEFT, fill=tk.Y)  # Révéler la barre latérale 2
+
+    def draw(self, event):
+        if self.drawing:
+            self.canvas.delete("temp_shape")
+            if self.shape_type == "line":
+                self.canvas.create_line(self.start_x, self.start_y, event.x, event.y, width=self.brush_size,
+                                        fill=self.color, tags="temp_shape")
+            elif self.shape_type == "rectangle":
+                self.canvas.create_rectangle(self.start_x, self.start_y, event.x, event.y, outline=self.color,
+                                             width=self.brush_size, tags="temp_shape")
+            elif self.shape_type == "circle":
+                radius = ((event.x - self.start_x) ** 2 + (event.y - self.start_y) ** 2) ** 0.5
+                self.canvas.create_oval(self.start_x - radius, self.start_y - radius,
+                                        self.start_x + radius, self.start_y + radius,
+                                        width=self.brush_size, outline=self.color, tags="temp_shape")
+            elif self.shape_type == "ellipse":
+                self.canvas.create_oval(self.start_x, self.start_y, event.x, event.y, outline=self.color,
+                                        width=self.brush_size, tags="temp_shape")
+            elif self.shape_type == "square":
+                side = min(abs(event.x - self.start_x), abs(event.y - self.start_y))
+                self.canvas.create_rectangle(self.start_x, self.start_y,
+                                             self.start_x + side, self.start_y + side,
+                                             outline=self.color, width=self.brush_size, tags="temp_shape")
+            elif self.shape_type == "triangle":
+                self.canvas.create_polygon(self.start_x, self.start_y, event.x, event.y,
+                                           self.start_x - (event.x - self.start_x), event.y, fill="",
+                                           outline=self.color, width=self.brush_size, tags="temp_shape")
+            elif self.shape_type == "star":
+                self.draw_star(event.x, event.y, 5, 30, 15)
+            elif self.shape_type == "arrow":
+                self.draw_arrow(self.start_x, self.start_y, event.x, event.y)
+            elif self.shape_type == "brush":
+                self.draw_brush(event.x, event.y)
+            elif self.shape_type == "eraser":
+                self.draw_eraser(event.x, event.y)
+
+    def draw_brush(self, x, y):
+        if self.prev_x is not None and self.prev_y is not None:
+            brush_width = self.brush_size
+            self.canvas.create_line(self.prev_x, self.prev_y, x, y, width=brush_width, fill=self.color)
+        self.prev_x = x
+        self.prev_y = y
+
+    def draw_eraser(self, x, y):
+        if self.prev_x is not None and self.prev_y is not None:
+            eraser_width = self.brush_size
+            self.canvas.create_line(self.prev_x, self.prev_y, x, y, width=eraser_width, fill="white")
+        self.prev_x = x
+        self.prev_y = y
+
+    def detect_face(self):
+        if self.cap is None:
+            self.cap = cv2.VideoCapture(0)
+            self.capture_id = self.window.after(10, self.update_face_detection)
+        else:
+            self.window.after_cancel(self.capture_id)
+            self.cap.release()
+            self.cap = None
+
+    def blur_faces(self):
+        self.face_blurred = not self.face_blurred  # Inverser l'état du floutage du visage
+
+    # ...
+
+    def update_face_detection(self):
+        ret, frame = self.cap.read()
+        if ret:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5, minSize=(30, 30))
+
+            if self.face_blurred:
+                for i, (x, y, w, h) in enumerate(faces):
+                    face_roi = frame[y:y + h, x:x + w]
+                    if i == self.selected_face_index:
+                        blurred_face = cv2.GaussianBlur(face_roi, (self.face_blur_intensity, self.face_blur_intensity), 0)
+                        frame[y:y + h, x:x + w] = blurred_face
+                    else:
+                        # Dessiner le rectangle autour des visages non sélectionnés
+                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+            # Afficher les indices des visages détectés
+            for i, (x, y, w, h) in enumerate(faces):
+                cv2.putText(frame, str(i), (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+            cv2.imshow('Face Detection', frame)
+
+        self.capture_id = self.window.after(10, self.update_face_detection)
+
+    def draw_star(self, x, y, arms, length, width):
+        angle = 360 / (2 * arms)
+        coords = []
+
+        for _ in range(2 * arms):
+            coords.extend([x, y, x + length, y])
+            x, y = self.rotate_point(x, y, x + length, y, angle)
+
+        self.canvas.create_line(*coords, width=width, fill=self.color, tags="temp_shape")
+
+    def draw_arrow(self, x1, y1, x2, y2):
+        self.canvas.create_line(x1, y1, x2, y2, width=self.brush_size, arrow=tk.LAST, fill=self.color,
+                                tags="temp_shape")
+
+    def rotate_point(self, x, y, origin_x, origin_y, angle):
+        angle_rad = angle * (3.141592653589793 / 180.0)
+        rotated_x = origin_x + (x - origin_x) * round(np.cos(angle_rad), 2) - (y - origin_y) * round(np.sin(angle_rad),
+                                                                                                     2)
+        rotated_y = origin_y + (x - origin_x) * round(np.sin(angle_rad), 2) + (y - origin_y) * round(np.cos(angle_rad),
+                                                                                                     2)
+        return rotated_x, rotated_y
+
+    def start_drawing(self, event):
+        self.start_x = event.x
+        self.start_y = event.y
+        self.prev_x = event.x
+        self.prev_y = event.y
+        self.drawing = True
+
+    def stop_drawing(self, event):
+        if self.drawing:
+            self.drawing = False
+            if self.shape_type == "line":
+                self.canvas.create_line(self.start_x, self.start_y, event.x, event.y, width=self.brush_size,
+                                        fill=self.color)
+            elif self.shape_type == "rectangle":
+                self.canvas.create_rectangle(self.start_x, self.start_y, event.x, event.y, outline=self.color,
+                                             width=self.brush_size)
+            elif self.shape_type == "circle":
+                radius = ((event.x - self.start_x) ** 2 + (event.y - self.start_y) ** 2) ** 0.5
+                self.canvas.create_oval(self.start_x - radius, self.start_y - radius,
+                                        self.start_x + radius, self.start_y + radius,
+                                        width=self.brush_size, outline=self.color)
+            elif self.shape_type == "ellipse":
+                self.canvas.create_oval(self.start_x, self.start_y, event.x, event.y, outline=self.color,
+                                        width=self.brush_size)
+            elif self.shape_type == "square":
+                side = min(abs(event.x - self.start_x), abs(event.y - self.start_y))
+                self.canvas.create_rectangle(self.start_x, self.start_y,
+                                             self.start_x + side, self.start_y + side,
+                                             outline=self.color, width=self.brush_size)
+            elif self.shape_type == "triangle":
+                self.canvas.create_polygon(self.start_x, self.start_y, event.x, event.y,
+                                           self.start_x - (event.x - self.start_x), event.y, fill="",
+                                           outline=self.color, width=self.brush_size)
+            elif self.shape_type == "star":
+                self.draw_star(event.x, event.y, 5, 30, 15)
+            elif self.shape_type == "arrow":
+                self.draw_arrow(self.start_x, self.start_y, event.x, event.y)
+            elif self.shape_type == "brush":
+                self.prev_x = None
+                self.prev_y = None
+            elif self.shape_type == "eraser":
+                self.prev_x = None
+                self.prev_y = None
+
+    def change_brush_size(self, event=None):
+        self.brush_size = self.brush_size_slider.get()
+
+    def toggle_canvas(self):
+        if self.canvas.winfo_ismapped():
+            self.canvas.pack_forget()  # Masquer le canevas
+        else:
+            self.canvas.pack()  # Révéler le canevas
+
+    def toggle_sidebar(self):
+        if self.sidebar_frame.winfo_ismapped():
+            self.sidebar_frame.pack_forget()  # Masquer la barre latérale
+        else:
+            self.sidebar_frame.pack(side=tk.LEFT, fill=tk.Y)  # Révéler la barre latérale
+
+    def rotate_image(self, angle):
+        if self.image is not None:
+            # Rotate the image
+            rotated_image = self.image.rotate(angle)
+
+            # Display the rotated image on the canvas
+            self.tk_image = ImageTk.PhotoImage(rotated_image)
+            self.canvas.create_image(0, 0, anchor="nw", image=self.tk_image)
+
+    def rotate_90_degrees(self):
+        self.rotate_image(90)
+
+    def rotate_180_degrees(self):
+        self.rotate_image(180)
+
+    def rotate_270_degrees(self):
+        self.rotate_image(270)
+
+    def rotate_custom(self):
+        angle = simpledialog.askfloat("Rotate Custom", "Enter rotation angle (degrees):", initialvalue=0.0)
+        if angle is not None:
+            self.rotate_image(angle)
+
+    def edge_detection(self):
+        # Implement edge detection functionality here
+        if self.image is not None:
+            # Convert the PIL image to a NumPy array
+            img_np = cv2.cvtColor(np.array(self.image), cv2.COLOR_RGB2BGR)
+
+            # Convert the image to grayscale
+            gray_img = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
+
+            # Apply edge detection using Canny
+            edges = cv2.Canny(gray_img, 50, 150)
+
+            # Convert the NumPy array back to a PIL image
+            edges_img = Image.fromarray(edges)
+
+            # Display the result on the canvas
+            self.tk_image = ImageTk.PhotoImage(edges_img)
+            self.canvas.create_image(0, 0, anchor="nw", image=self.tk_image)
+        pass
+
+    def load_image(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp")])
+        if file_path:
+            self.image = Image.open(file_path)
+            self.tk_image = ImageTk.PhotoImage(self.image)
+            self.canvas.create_image(0, 0, anchor="nw", image=self.tk_image)
+
+    def blur_image(self):
+        if self.image is not None:
+            blurred_image = self.image.filter(ImageFilter.BLUR)
+            self.tk_image = ImageTk.PhotoImage(blurred_image)
+            self.canvas.create_image(0, 0, anchor="nw", image=self.tk_image)
+
+    def crop_image(self):
+        if self.image is not None:
+            width, height = self.image.size
+            cropped_image = self.image.crop((width // 4, height // 4, 3 * width // 4, 3 * height // 4))
+            self.tk_image = ImageTk.PhotoImage(cropped_image)
+            self.canvas.create_image(0, 0, anchor="nw", image=self.tk_image)
+
+    def execute_command(self, command):
+        command()
+
+    def change_color(self):
+        color = colorchooser.askcolor(title="Choose Color")[1]
+        if color:
+            self.color = color
+
+    def change_shape(self, shape):
+        if callable(shape):
+            shape()  # Call the function directly (e.g., for face detection)
+        else:
+            self.shape_type = shape
+
+
+root = tk.Tk()
+paint = PaintApp(root)
+root.mainloop()
